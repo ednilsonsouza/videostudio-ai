@@ -102,19 +102,33 @@ app.get('/api/status', async (req, res) => {
   }
 
   if (operation.error) {
-    return res.json({ done: true, error: operation.error.message || 'Erro na gera\u00e7\u00e3o.' });
+    const errMsg = operation.error.message || 'Erro na gera\u00e7\u00e3o.';
+    console.error('/api/status operation error:', JSON.stringify(operation.error));
+    return res.json({ done: true, error: errMsg });
   }
 
   if (!operation.done) {
     return res.json({ done: false });
   }
 
-  const videos =
-    operation.result?.generatedVideos ||
-    operation.response?.generatedVideos;
+  const response = operation.response || operation.result;
+  const videos = response?.generatedVideos;
 
   if (!videos?.length) {
-    return res.json({ done: true, error: 'Nenhum v\u00eddeo gerado. O prompt pode ter sido bloqueado.' });
+    const reasons = response?.raiMediaFilteredReasons || [];
+    const filteredCount = response?.raiMediaFilteredCount || 0;
+
+    let errorMsg = 'Nenhum v\u00eddeo gerado.';
+    if (reasons.length > 0) {
+      errorMsg += ' Motivo: ' + reasons.join('; ');
+    } else if (filteredCount > 0) {
+      errorMsg += ` ${filteredCount} v\u00eddeo(s) filtrado(s) pelas pol\u00edticas de seguran\u00e7a.`;
+    } else {
+      errorMsg += ' O prompt pode ter sido bloqueado pelas pol\u00edticas de seguran\u00e7a ou o modelo n\u00e3o conseguiu gerar o v\u00eddeo. Tente reformular o prompt.';
+    }
+
+    console.error('/api/status no videos:', JSON.stringify({ filteredCount, reasons }));
+    return res.json({ done: true, error: errorMsg });
   }
 
   const video = videos[0].video;
