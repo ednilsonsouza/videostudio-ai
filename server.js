@@ -1,9 +1,9 @@
 import express from 'express';
 import { GoogleGenAI } from '@google/genai';
-import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import fs from 'fs';
 
 dotenv.config();
 
@@ -13,7 +13,6 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(express.json());
 
-// CORS for dev
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -22,35 +21,24 @@ app.use((req, res, next) => {
   next();
 });
 
-// Ensure tmp directory exists
-const tmpDir = path.join(__dirname, 'tmp');
-if (!fs.existsSync(tmpDir)) {
-  fs.mkdirSync(tmpDir, { recursive: true });
-}
-
 if (!process.env.GEMINI_API_KEY) {
-  console.error('⚠️  GEMINI_API_KEY not found in .env file');
+  console.error('\u26a0\ufe0f  GEMINI_API_KEY not found in .env file');
   console.error('   Create a .env file with: GEMINI_API_KEY=your_key_here');
 }
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
-// Job store (in-memory)
-const jobs = new Map();
-let jobCounter = 0;
-
-// Supported Veo models via Gemini Developer API (v1beta)
 const MODELS = {
-  'veo-3.1-generate-preview': 'Veo 3.1 — Melhor qualidade (Com áudio)',
-  'veo-3.1-fast-generate-preview': 'Veo 3.1 Fast — Mais rápido (Com áudio)',
-  'veo-3.1-lite-generate-preview': 'Veo 3.1 Lite — Mais barato (Com áudio)',
-  'veo-2.0-generate-001': 'Veo 2.0 — Sem áudio',
+  'veo-3.1-generate-preview': 'Veo 3.1 \u2014 Melhor qualidade (Com \u00e1udio)',
+  'veo-3.1-fast-generate-preview': 'Veo 3.1 Fast \u2014 Mais r\u00e1pido (Com \u00e1udio)',
+  'veo-3.1-lite-generate-preview': 'Veo 3.1 Lite \u2014 Mais barato (Com \u00e1udio)',
+  'veo-2.0-generate-001': 'Veo 2.0 \u2014 Sem \u00e1udio',
 };
 
-// POST /api/generate — start video generation
+// POST /api/generate \u2014 inicia gera\u00e7\u00e3o e retorna operationName
 app.post('/api/generate', async (req, res) => {
   if (!process.env.GEMINI_API_KEY) {
-    return res.status(500).json({ error: 'GEMINI_API_KEY não configurada. Crie um arquivo .env com sua chave.' });
+    return res.status(500).json({ error: 'GEMINI_API_KEY n\u00e3o configurada no servidor.' });
   }
 
   const {
@@ -61,170 +49,123 @@ app.post('/api/generate', async (req, res) => {
   } = req.body;
 
   if (!prompt?.trim()) {
-    return res.status(400).json({ error: 'Prompt é obrigatório.' });
+    return res.status(400).json({ error: 'Prompt \u00e9 obrigat\u00f3rio.' });
   }
 
-  const jobId = `job_${Date.now()}_${jobCounter++}`;
-  jobs.set(jobId, { status: 'starting', progress: 5, message: 'Iniciando geração...' });
-
-  // Fire-and-forget async generation
-  runGeneration(jobId, prompt.trim(), aspectRatio, durationSeconds, model).catch((err) => {
-    console.error(`[${jobId}] Generation error:`, err.message);
-    jobs.set(jobId, { status: 'error', error: err.message });
-  });
-
-  res.json({ jobId });
-});
-
-async function runGeneration(jobId, prompt, aspectRatio, durationSeconds, model) {
   try {
-    jobs.set(jobId, { status: 'generating', progress: 10, message: 'Enviando para a API Gemini...' });
-
-    const config = {
-      aspectRatio,
-      durationSeconds: Number(durationSeconds),
-    };
-
-    let operation = await ai.models.generateVideos({
+    const operation = await ai.models.generateVideos({
       model,
-      prompt,
-      config,
+      prompt: prompt.trim(),
+      config: {
+        aspectRatio,
+        durationSeconds: Number(durationSeconds),
+      },
     });
 
-    jobs.set(jobId, { status: 'generating', progress: 15, message: 'Geração em andamento...' });
-
-    const maxAttempts = 72; // 72 * 15s = 18 minutes max
-    let attempts = 0;
-
-    while (!operation.done && attempts < maxAttempts) {
-      await sleep(15000);
-      attempts++;
-
-      try {
-        operation = await ai.operations.get({ operation });
-      } catch (pollErr) {
-        // Some SDK versions use different signature
-        try {
-          operation = await ai.operations.get(operation);
-        } catch {
-          throw pollErr;
-        }
-      }
-
-      const progress = Math.min(15 + Math.round((attempts / maxAttempts) * 65), 80);
-      const elapsed = attempts * 15;
-      jobs.set(jobId, {
-        status: 'generating',
-        progress,
-        message: `Gerando vídeo... (${formatTime(elapsed)} decorrido)`,
-      });
-    }
-
-    if (!operation.done) {
-      throw new Error('Timeout: a geração demorou mais de 18 minutos.');
-    }
-
-    jobs.set(jobId, { status: 'downloading', progress: 85, message: 'Baixando vídeo...' });
-
-    // Extract video from response (handle both .result and .response for compatibility)
-    const generatedVideos =
-      operation.result?.generatedVideos ||
-      operation.response?.generatedVideos;
-
-    if (!generatedVideos?.length) {
-      const reason = operation.error?.message || 'Nenhum vídeo foi gerado. O prompt pode ter sido bloqueado por políticas de segurança.';
-      throw new Error(reason);
-    }
-
-    const videoObj = generatedVideos[0].video;
-    const videoUri = videoObj?.uri;
-    const videoName = videoObj?.name; // e.g. "files/xxxxx"
-
-    if (!videoUri && !videoName) {
-      throw new Error('Resposta da API não contém URI do vídeo.');
-    }
-
-    // Build download URL
-    const apiKey = process.env.GEMINI_API_KEY;
-    let downloadUrl;
-
-    if (videoUri) {
-      // The URI from Gemini Files API needs ?alt=media to get the bytes
-      const u = new URL(videoUri.startsWith('http') ? videoUri : `https://generativelanguage.googleapis.com/v1beta/${videoName}`);
-      u.searchParams.set('alt', 'media');
-      u.searchParams.set('key', apiKey);
-      downloadUrl = u.toString();
-    } else {
-      downloadUrl = `https://generativelanguage.googleapis.com/v1beta/${videoName}?alt=media&key=${apiKey}`;
-    }
-
-    const response = await fetch(downloadUrl);
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Falha ao baixar vídeo: ${response.status} — ${body.slice(0, 200)}`);
-    }
-
-    const buffer = await response.arrayBuffer();
-    const videoPath = path.join(tmpDir, `${jobId}.mp4`);
-    fs.writeFileSync(videoPath, Buffer.from(buffer));
-
-    jobs.set(jobId, {
-      status: 'done',
-      progress: 100,
-      message: 'Vídeo pronto!',
-      videoPath,
-      mimeType: videoObj?.mimeType || 'video/mp4',
-      aspectRatio,
-    });
-
-    // Auto-cleanup after 2 hours
-    setTimeout(() => {
-      try {
-        if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
-        jobs.delete(jobId);
-      } catch {}
-    }, 7200000);
-
-    console.log(`[${jobId}] Done — ${videoPath}`);
+    res.json({ operationName: operation.name });
   } catch (err) {
-    jobs.set(jobId, { status: 'error', error: err.message });
-    throw err;
+    console.error('/api/generate error:', err.message);
+    res.status(500).json({ error: err.message });
   }
-}
-
-// GET /api/status/:jobId
-app.get('/api/status/:jobId', (req, res) => {
-  const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'Job não encontrado.' });
-  // Don't expose the file path
-  const { videoPath, ...safeJob } = job;
-  res.json(safeJob);
 });
 
-// GET /api/video/:jobId — stream video
-app.get('/api/video/:jobId', (req, res) => {
-  const job = jobs.get(req.params.jobId);
-  if (!job || job.status !== 'done') {
-    return res.status(404).json({ error: 'Vídeo não está pronto.' });
+// GET /api/status?op=... \u2014 consulta status da opera\u00e7\u00e3o Gemini
+app.get('/api/status', async (req, res) => {
+  const { op } = req.query;
+  if (!op) {
+    return res.status(400).json({ error: 'Par\u00e2metro "op" (operationName) \u00e9 obrigat\u00f3rio.' });
   }
 
-  const { videoPath, mimeType } = job;
-  if (!fs.existsSync(videoPath)) {
-    return res.status(404).json({ error: 'Arquivo de vídeo não encontrado.' });
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'GEMINI_API_KEY n\u00e3o configurada.' });
   }
 
-  const stat = fs.statSync(videoPath);
-  res.setHeader('Content-Type', mimeType || 'video/mp4');
-  res.setHeader('Content-Length', stat.size);
+  let operation;
+
+  try {
+    operation = await ai.operations.get({ operation: { name: op } });
+  } catch {
+    try {
+      const opPath = op.startsWith('http') ? new URL(op).pathname.replace(/^\//, '') : op;
+      const r = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/${opPath}?key=${apiKey}`
+      );
+      if (!r.ok) {
+        const body = await r.text();
+        return res.status(r.status).json({ error: `Erro na opera\u00e7\u00e3o: ${body.slice(0, 200)}` });
+      }
+      operation = await r.json();
+    } catch (fetchErr) {
+      return res.status(502).json({ error: fetchErr.message });
+    }
+  }
+
+  if (operation.error) {
+    return res.json({ done: true, error: operation.error.message || 'Erro na gera\u00e7\u00e3o.' });
+  }
+
+  if (!operation.done) {
+    return res.json({ done: false });
+  }
+
+  const videos =
+    operation.result?.generatedVideos ||
+    operation.response?.generatedVideos;
+
+  if (!videos?.length) {
+    return res.json({ done: true, error: 'Nenhum v\u00eddeo gerado. O prompt pode ter sido bloqueado.' });
+  }
+
+  const video = videos[0].video;
+
+  res.json({
+    done: true,
+    videoName: video.name,
+    videoUri: video.uri,
+    mimeType: video.mimeType || 'video/mp4',
+  });
+});
+
+// GET /api/video?name=... \u2014 baixa e serve o v\u00eddeo via Gemini Files API
+app.get('/api/video', async (req, res) => {
+  const { name } = req.query;
+  if (!name) {
+    return res.status(400).json({ error: 'Par\u00e2metro "name" \u00e9 obrigat\u00f3rio.' });
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'GEMINI_API_KEY n\u00e3o configurada.' });
+  }
+
+  const downloadUrl =
+    `https://generativelanguage.googleapis.com/v1beta/${name}?alt=media&key=${apiKey}`;
+
+  const response = await fetch(downloadUrl);
+
+  if (!response.ok) {
+    const body = await response.text();
+    return res
+      .status(response.status)
+      .json({ error: `Falha ao baixar v\u00eddeo: ${body.slice(0, 200)}` });
+  }
+
+  const contentType = response.headers.get('content-type') || 'video/mp4';
+  const contentLength = response.headers.get('content-length');
+
+  res.setHeader('Content-Type', contentType);
   res.setHeader('Content-Disposition', 'inline; filename="video-gerado.mp4"');
-  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  if (contentLength) res.setHeader('Content-Length', contentLength);
 
-  fs.createReadStream(videoPath).pipe(res);
+  const buffer = await response.arrayBuffer();
+  res.send(Buffer.from(buffer));
 });
 
-// GET /api/models — list available models
-app.get('/api/models', (req, res) => {
+// GET /api/models \u2014 lista modelos dispon\u00edveis
+app.get('/api/models', (_req, res) => {
   res.json(
     Object.entries(MODELS).map(([id, label]) => ({ id, label }))
   );
@@ -234,28 +175,15 @@ app.get('/api/models', (req, res) => {
 const dist = path.join(__dirname, 'dist');
 if (process.env.NODE_ENV === 'production' && fs.existsSync(dist)) {
   app.use(express.static(dist));
-  app.get('*', (req, res) => {
+  app.get('*', (_req, res) => {
     res.sendFile(path.join(dist, 'index.html'));
   });
 }
 
 const PORT = Number(process.env.PORT) || 3001;
 app.listen(PORT, () => {
-  console.log(`\n🎬 VideoStudio AI rodando em http://localhost:${PORT}`);
-  if (process.env.NODE_ENV !== 'production') {
-    console.log(`   Frontend (dev): http://localhost:5173`);
-  }
+  console.log(`\n\ud83c\udfac VideoStudio AI running on http://localhost:${PORT}`);
   if (!process.env.GEMINI_API_KEY) {
-    console.log('\n⚠️  Configure GEMINI_API_KEY no arquivo .env para usar o app.\n');
+    console.log('\n\u26a0\ufe0f  Configure GEMINI_API_KEY in .env to use the app.\n');
   }
 });
-
-// Helpers
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function formatTime(seconds) {
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-}
